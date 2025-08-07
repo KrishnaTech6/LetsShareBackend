@@ -1,15 +1,16 @@
 package com.krishna.letsshare.handler
 
-import org.json.JSONObject
+import org.springframework.web.socket.BinaryMessage
 import org.springframework.web.socket.CloseStatus
 import org.springframework.web.socket.TextMessage
 import org.springframework.web.socket.WebSocketSession
-import org.springframework.web.socket.handler.TextWebSocketHandler
+import org.springframework.web.socket.handler.AbstractWebSocketHandler
+import java.util.concurrent.ConcurrentHashMap
 
-class ScreenShareHandler : TextWebSocketHandler() {
+class ScreenShareHandler : AbstractWebSocketHandler() {
 
-    private val sessions = mutableMapOf<String, WebSocketSession>()  // deviceId -> session
-    private val senderToViewer = mutableMapOf<String, String>()      // senderId -> viewerId
+    // Store active sessions mapped by deviceId
+    private val sessions = ConcurrentHashMap<String, WebSocketSession>()
 
     override fun afterConnectionEstablished(session: WebSocketSession) {
         val deviceId = session.uri?.query?.split("=")?.getOrNull(1)
@@ -22,50 +23,39 @@ class ScreenShareHandler : TextWebSocketHandler() {
         }
     }
 
-    override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
-        try {
-            val payload = message.payload
-            val json = JSONObject(payload)
-            val type = json.getString("type")
+    override fun handleBinaryMessage(session: WebSocketSession, message: BinaryMessage) {
+        val senderId = getSenderIdFromSession(session)
+        val imageBytes = message.payload.array()
+        println("📸 Received binary image from: $senderId (${imageBytes.size} bytes)")
 
-            when (type) {
-                "init" -> handleInit(json)
-                "image" -> handleImage(json)
-                else -> println("⚠️ Unknown message type: $type")
+        // Example: Broadcast to all other connected sessions (or selectively)
+        sessions.forEach { (deviceId, otherSession) ->
+            if (otherSession != session && otherSession.isOpen) {
+                try {
+                    otherSession.sendMessage(BinaryMessage(imageBytes))
+                } catch (e: Exception) {
+                    println("⚠️ Failed to forward to $deviceId: ${e.message}")
+                }
             }
-        } catch (e: Exception) {
-            println("⚠️ Error handling message: ${e.message}")
         }
     }
 
-    private fun handleInit(json: JSONObject) {
-        val senderId = json.getString("senderId")
-        val viewerId = json.getString("viewerId")
-        senderToViewer[senderId] = viewerId
-        println("🔄 Routing image from sender [$senderId] to viewer [$viewerId]")
-    }
-
-    private fun handleImage(json: JSONObject) {
-        val senderId = json.getString("senderId")
-        val imageData = json.getString("data")
-
-        val viewerId = senderToViewer[senderId]
-        val viewerSession = viewerId?.let { sessions[it] }
-
-        if (viewerSession?.isOpen == true) {
-            viewerSession.sendMessage(TextMessage(json.toString()))
-            println("📤 Frame sent from $senderId ➡️ $viewerId")
-        } else {
-            println("⚠️ Viewer session not available or closed for $viewerId")
-        }
+    override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
+        println("⚠️ Received unexpected text message: ${message.payload}")
+        // You can still support control messages here if needed
     }
 
     override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
         val deviceId = sessions.entries.find { it.value == session }?.key
         if (deviceId != null) {
             sessions.remove(deviceId)
-            senderToViewer.entries.removeIf { it.key == deviceId || it.value == deviceId }
             println("❌ Device disconnected: $deviceId")
         }
     }
+
+    private fun getSenderIdFromSession(session: WebSocketSession): String {
+        return session.uri?.query?.split("=")?.getOrNull(1) ?: "unknown"
+    }
+
+    fun getDeviceSession(deviceId: String): WebSocketSession? = sessions[deviceId]
 }
