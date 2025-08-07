@@ -1,6 +1,5 @@
-package com.krishna.letsshare
+package com.krishna.letsshare.handler
 
-import com.fasterxml.jackson.databind.util.JSONPObject
 import org.json.JSONObject
 import org.springframework.web.socket.CloseStatus
 import org.springframework.web.socket.TextMessage
@@ -16,47 +15,57 @@ class ScreenShareHandler : TextWebSocketHandler() {
         val deviceId = session.uri?.query?.split("=")?.getOrNull(1)
         if (deviceId != null) {
             sessions[deviceId] = session
-            println("Device connected: $deviceId")
+            println("🔌 Device connected: $deviceId")
         } else {
-            session.close()
+            println("❌ Connection rejected: No deviceId in query")
+            session.close(CloseStatus.BAD_DATA)
         }
     }
 
     override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
-        val payload = message.payload
+        try {
+            val payload = message.payload
+            val json = JSONObject(payload)
+            val type = json.getString("type")
 
-        val json = JSONObject(payload)
-        val type = json.getString("type")
-
-        when (type) {
-            "init" -> {
-                val sender = json.getString("senderId")
-                val viewer = json.getString("viewerId")
-                senderToViewer[sender] = viewer
-                println("Viewer $viewer registered for sender $sender")
+            when (type) {
+                "init" -> handleInit(json)
+                "image" -> handleImage(json)
+                else -> println("⚠️ Unknown message type: $type")
             }
+        } catch (e: Exception) {
+            println("⚠️ Error handling message: ${e.message}")
+        }
+    }
 
-            "image" -> {
-                val sender = json.getString("senderId")
-                val imageData = json.getString("data")
+    private fun handleInit(json: JSONObject) {
+        val senderId = json.getString("senderId")
+        val viewerId = json.getString("viewerId")
+        senderToViewer[senderId] = viewerId
+        println("🔄 Routing image from sender [$senderId] to viewer [$viewerId]")
+    }
 
-                val viewerId = senderToViewer[sender]
-                val viewerSession = sessions[viewerId]
+    private fun handleImage(json: JSONObject) {
+        val senderId = json.getString("senderId")
+        val imageData = json.getString("data")
 
-                if (viewerSession?.isOpen == true) {
-                    viewerSession.sendMessage(TextMessage(payload))
-                }
-            }
+        val viewerId = senderToViewer[senderId]
+        val viewerSession = viewerId?.let { sessions[it] }
+
+        if (viewerSession?.isOpen == true) {
+            viewerSession.sendMessage(TextMessage(json.toString()))
+            println("📤 Frame sent from $senderId ➡️ $viewerId")
+        } else {
+            println("⚠️ Viewer session not available or closed for $viewerId")
         }
     }
 
     override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
-        val entry = sessions.entries.find { it.value == session }
-        if (entry != null) {
-            val deviceId = entry.key
+        val deviceId = sessions.entries.find { it.value == session }?.key
+        if (deviceId != null) {
             sessions.remove(deviceId)
             senderToViewer.entries.removeIf { it.key == deviceId || it.value == deviceId }
-            println("Device disconnected: $deviceId")
+            println("❌ Device disconnected: $deviceId")
         }
     }
 }
