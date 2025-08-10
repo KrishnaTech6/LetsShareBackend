@@ -11,9 +11,11 @@ import org.springframework.web.socket.server.support.DefaultHandshakeHandler
 
 @Configuration
 @EnableWebSocket
-class WebSocketConfig : WebSocketConfigurer {
+class WebSocketConfig(
+    private val screenShareHandler: ScreenShareHandler
+)  : WebSocketConfigurer {
     override fun registerWebSocketHandlers(registry: WebSocketHandlerRegistry) {
-        registry.addHandler(ScreenShareHandler(), "/ws/screen")
+        registry.addHandler(screenShareHandler, "/ws/screen")
             .setAllowedOrigins("*")
             .setHandshakeHandler(DefaultHandshakeHandler())
     }

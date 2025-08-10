@@ -1,5 +1,6 @@
 package com.krishna.letsshare.handler
 
+import org.springframework.stereotype.Component
 import org.springframework.web.socket.BinaryMessage
 import org.springframework.web.socket.CloseStatus
 import org.springframework.web.socket.TextMessage
@@ -7,55 +8,118 @@ import org.springframework.web.socket.WebSocketSession
 import org.springframework.web.socket.handler.AbstractWebSocketHandler
 import java.util.concurrent.ConcurrentHashMap
 
+
+@Component
 class ScreenShareHandler : AbstractWebSocketHandler() {
 
-    // Store active sessions mapped by deviceId
-    private val sessions = ConcurrentHashMap<String, WebSocketSession>()
+    // deviceId -> sender session
+    private val senders = ConcurrentHashMap<String, WebSocketSession>()
 
-    override fun afterConnectionEstablished(session: WebSocketSession) {
-        val deviceId = session.uri?.query?.split("=")?.getOrNull(1)
-        if (deviceId != null) {
-            sessions[deviceId] = session
-            println("🔌 Device connected: $deviceId")
-        } else {
-            println("❌ Connection rejected: No deviceId in query")
-            session.close(CloseStatus.BAD_DATA)
-        }
-    }
+    // deviceId -> viewer session (single viewer per device)
+    private val viewers = ConcurrentHashMap<String, WebSocketSession>()
+
+    private val streamingStatus = ConcurrentHashMap<String, Boolean>()
 
     override fun handleBinaryMessage(session: WebSocketSession, message: BinaryMessage) {
-        val senderId = getSenderIdFromSession(session)
-        val imageBytes = message.payload.array()
-        println("📸 Received binary image from: $senderId (${imageBytes.size} bytes)")
-
-        // Example: Broadcast to all other connected sessions (or selectively)
-        sessions.forEach { (deviceId, otherSession) ->
-            if (otherSession != session && otherSession.isOpen) {
-                try {
-                    otherSession.sendMessage(BinaryMessage(imageBytes))
-                } catch (e: Exception) {
-                    println("⚠️ Failed to forward to $deviceId: ${e.message}")
+        val senderDeviceId = senders.entries.find { it.value == session }?.key
+        if (senderDeviceId != null) {
+            streamingStatus[senderDeviceId] = true
+            viewers[senderDeviceId]?.let { viewerSession ->
+                if (viewerSession.isOpen) {
+                    try {
+                        viewerSession.sendMessage(message)
+                    } catch (e: Exception) {
+                        println("Failed to send frame to viewer of $senderDeviceId: ${e.message}")
+                    }
                 }
             }
         }
     }
 
-    override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
-        println("⚠️ Received unexpected text message: ${message.payload}")
-        // You can still support control messages here if needed
-    }
+    override fun afterConnectionEstablished(session: WebSocketSession) {
+        val query = session.uri?.query ?: ""
+        val role = getParam(query, "role")
+        when (role) {
+            "sender" -> {
+                val deviceId = getParam(query, "deviceId")
+                if (deviceId.isNullOrBlank()) {
+                    session.close(CloseStatus.BAD_DATA)
+                    println("Sender connection rejected (no deviceId)")
+                } else {
+                    if (senders.containsKey(deviceId)) {
+                        // Device is already connected, reject new one
+                        println("Sender connection ignored (already connected): $deviceId")
+                        try { session.close(CloseStatus.NORMAL) } catch (_: Exception) {}
+                        return
+                    }
+                    senders[deviceId]?.let { oldSession ->
+                        try { oldSession.close(CloseStatus.NORMAL) } catch (_: Exception) {}
+                    }
+                    senders[deviceId] = session
+                    streamingStatus[deviceId] = false
+                    println("🔌 Sender connected: $deviceId")
+                }
+            }
+            "viewer" -> {
+                val watch = getParam(query, "watch")
+                if (watch.isNullOrBlank()) {
+                    session.close(CloseStatus.BAD_DATA)
+                    println("Viewer connection rejected (no watch param)")
+                } else {
+                    // Remove this session from ANY other device viewer slot before assigning
+                    viewers.entries.removeIf { (_, existingSession) ->
+                        if (existingSession == session) {
+                            println("Removing stale viewer session from another device")
+                            true
+                        } else false
+                    }
+                    // Close previous viewer for this device (if any)
+                    viewers[watch]?.let { oldViewer ->
+                        try { oldViewer.close(CloseStatus.NORMAL) } catch (_: Exception) {}
+                    }
 
-    override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
-        val deviceId = sessions.entries.find { it.value == session }?.key
-        if (deviceId != null) {
-            sessions.remove(deviceId)
-            println("❌ Device disconnected: $deviceId")
+                    viewers[watch] = session
+                    println("Viewer connected for device: $watch")
+                }
+            }
+            else -> {
+                session.close(CloseStatus.BAD_DATA)
+                println("Connection rejected (missing/unknown role)")
+            }
         }
     }
 
-    private fun getSenderIdFromSession(session: WebSocketSession): String {
-        return session.uri?.query?.split("=")?.getOrNull(1) ?: "unknown"
+    // small text messages (optional controls)
+    override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
+        println("Text message from ${session.id}: ${message.payload}")
     }
 
-    fun getDeviceSession(deviceId: String): WebSocketSession? = sessions[deviceId]
+    override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
+        // remove if present in senders
+        val removedSender = senders.entries.find { it.value == session }?.key
+
+        if (removedSender != null) {
+            senders.remove(removedSender)
+            println("Sender disconnected: $removedSender")
+        }
+        // remove if present in viewers
+        val removedViewer = viewers.entries.find { it.value == session }?.key
+        if (removedViewer != null) {
+            viewers.remove(removedViewer)
+            println("Viewer disconnected for device: $removedViewer")
+        }
+    }
+
+    private fun getParam(query: String, key: String): String? {
+        if (query.isBlank()) return null
+        return query.split("&").mapNotNull {
+            val parts = it.split("=")
+            if (parts.size == 2 && parts[0] == key) parts[1] else null
+        }.firstOrNull()
+    }
+
+    // optional: helper for other code to know if a device is online
+    fun isDeviceOnline(deviceId: String): Boolean = senders.containsKey(deviceId)
+
+    fun isDeviceStreaming(deviceId: String): Boolean = streamingStatus[deviceId] == true
 }

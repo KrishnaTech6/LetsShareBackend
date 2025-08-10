@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Simple Screen Viewer</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 12px; color:#111; }
+        #devices { margin-bottom: 12px; }
+        .device { margin:8px 0; display:flex; align-items:center; gap:8px; }
+        button { padding:6px 10px; cursor:pointer; }
+        canvas { border:1px solid #ccc; display:block; margin-top:12px; max-width:100%; }
+        #status { margin-top:8px; color: #555; }
+    </style>
+</head>
+<body>
+<h2>Live Device Viewer</h2>
+<div id="devices">Loading devices…</div>
+
+<div>
+    <button id="stopBtn" disabled>Stop Viewing</button>
+    <span id="status">Not viewing</span>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+
+    const SERVER_HOST = "localhost:8080";
+
+    const API_URL = `http://${SERVER_HOST}/api/devices`;
+    const WS_BASE = `ws://${SERVER_HOST}/ws/screen`;
+
+    // ====== UI elements ======
+    const devicesDiv = document.getElementById('devices');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusSpan = document.getElementById('status');
+
+    let ws = null;
+    let currentDevice = null;
+
+    // Fetch device list and render the UI
+    async function loadDevices() {
+      devicesDiv.innerHTML = 'Loading devices…';
+      try {
+        const r = await fetch(API_URL);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const devices = await r.json(); // expects array [{deviceId, deviceName}, ...]
+        renderDeviceList(devices || []);
+      } catch (e) {
+        devicesDiv.innerHTML = 'Failed to load devices: ' + e.message;
+      }
+    }
+
+ function renderDeviceList(devices) {
+    devicesDiv.innerHTML = ""; // Clear existing list
+
+    devices.forEach(d => {
+        const container = document.createElement("div");
+        container.className = "device";
+
+        // Device Name + ID
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = `${d.deviceName} (ID: ${d.deviceId})`;
+        container.appendChild(nameSpan);
+
+        // Status
+        const statusSpan = document.createElement("span");
+        if (!d.isOnline) {
+            statusSpan.textContent = "Offline";
+            statusSpan.style.color = "gray";
+        } else {
+            statusSpan.textContent = d.isStreaming ? "Streaming" : "Idle";
+            statusSpan.style.color = d.isStreaming ? "green" : "orange";
+        }
+        container.appendChild(statusSpan);
+
+        // Action Button
+        const btn = document.createElement("button");
+        if (d.isOnline) {
+            btn.textContent = "View";
+            btn.onclick = () => startViewing(d.deviceId);
+        } else {
+            btn.textContent = "Offline";
+            btn.disabled = true;
+            btn.style.opacity = "0.6";
+        }
+        container.appendChild(btn);
+
+        devicesDiv.appendChild(container);
+    });
+}
+
+
+    function escapeHtml(s) {
+      return (s + '').replace(/[&<>"'`=\/]/g, c => '&#' + c.charCodeAt(0) + ';');
+    }
+
+    // Start viewing selected device
+    function startViewing(deviceId) {
+      stopViewing(); // stop any previous
+      ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear old frame
+
+      currentDevice = deviceId;
+      statusSpan.textContent = `Connecting to ${deviceId}...`;
+
+      const url = `${WS_BASE}?role=viewer&watch=${encodeURIComponent(deviceId)}`;
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        console.log('Viewer WS open', url);
+        stopBtn.disabled = false;
+        statusSpan.textContent = `Viewing ${deviceId}`;
+      };
+
+      ws.onmessage = async (evt) => {
+        if (deviceId !== currentDevice) return; // ignore stale frames
+        // if text control message:
+        if (typeof evt.data === 'string') {
+          console.log('text message from server:', evt.data);
+          return;
+        }
+        // binary ArrayBuffer => draw
+        try {
+          const ab = evt.data;
+          const blob = new Blob([ab], { type: 'image/jpeg' });
+          // using createImageBitmap is fast and non-blocking
+          const bitmap = await createImageBitmap(blob);
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          ctx.drawImage(bitmap, 0, 0);
+        } catch (err) {
+          console.warn('failed to render frame', err);
+        }
+      };
+
+      ws.onerror = (e) => {
+        console.error('Viewer ws error', e);
+        statusSpan.textContent = 'WebSocket error';
+      };
+
+      ws.onclose = (ev) => {
+        console.log('Viewer ws closed', ev);
+        stopBtn.disabled = true;
+        statusSpan.textContent = 'Not viewing';
+        ws = null;
+      };
+    }
+
+    function stopViewing() {
+      if (ws) {
+        ws.onmessage = null;  // detach old handler
+        ws.onclose = null;
+        ws.onerror = null;
+        try { ws.close(); } catch (e) {}
+        ws = null;
+      }
+      stopBtn.disabled = true;
+      currentDevice = null;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      statusSpan.textContent = 'Not viewing';
+    }
+
+    stopBtn.addEventListener('click', stopViewing);
+
+    // Refresh devices every 5s
+    loadDevices();
+    setInterval(loadDevices, 5000);
+</script>
+</body>
+</html>
