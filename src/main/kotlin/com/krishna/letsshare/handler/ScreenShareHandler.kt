@@ -15,7 +15,7 @@ class ScreenShareHandler : AbstractWebSocketHandler() {
     // deviceId -> sender session
     private val senders = ConcurrentHashMap<String, WebSocketSession>()
 
-    // deviceId -> viewer session (single viewer per device)
+    // deviceId -> viewer session (single viewer)
     private val viewers = ConcurrentHashMap<String, WebSocketSession>()
 
     private val streamingStatus = ConcurrentHashMap<String, Boolean>()
@@ -91,7 +91,19 @@ class ScreenShareHandler : AbstractWebSocketHandler() {
 
     // small text messages (optional controls)
     override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
-        println("Text message from ${session.id}: ${message.payload}")
+        val payload = message.payload.trim()
+        println("Text message from ${session.id}: $payload")
+
+        // If viewer sends a "start" command, forward it to the sender device
+        if (payload.startsWith("START_STREAM:")) {
+            val deviceId = payload.removePrefix("START_STREAM:").trim()
+            senders[deviceId]?.let { senderSession ->
+                if (senderSession.isOpen) {
+                    senderSession.sendMessage(TextMessage("START_STREAM"))
+                    println("Sent START_STREAM to $deviceId")
+                }
+            }
+        }
     }
 
     override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
@@ -122,4 +134,13 @@ class ScreenShareHandler : AbstractWebSocketHandler() {
     fun isDeviceOnline(deviceId: String): Boolean = senders.containsKey(deviceId)
 
     fun isDeviceStreaming(deviceId: String): Boolean = streamingStatus[deviceId] == true
+
+    fun sendStartCommand(deviceId: String) {
+        senders[deviceId]?.let {
+            if (it.isOpen) {
+                it.sendMessage(TextMessage("START_STREAM"))
+            }
+        }
+    }
+
 }

@@ -1,16 +1,19 @@
 package com.krishna.letsshare.controller
 
+import com.krishna.letsshare.handler.ScreenShareHandler
 import com.krishna.letsshare.model.DeviceRegisterRequest
 import com.krishna.letsshare.model.DeviceRegisterResponse
 import com.krishna.letsshare.service.DeviceService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 
+
 @RestController
 @RequestMapping("/api")
 @CrossOrigin // Enable if testing from Android emulator to localhost
 class DeviceController(
-    private val deviceService: DeviceService
+    private val deviceService: DeviceService,
+    private val screenShareHandler: ScreenShareHandler
 ) {
 
     @PostMapping("/register")
@@ -22,5 +25,11 @@ class DeviceController(
     @GetMapping("/devices")
     fun getDevices(): ResponseEntity<List<DeviceRegisterRequest>> {
         return ResponseEntity.ok(deviceService.getAllDevices())
+    }
+
+    @PostMapping("/start/{deviceId}")
+    fun startStream(@PathVariable deviceId: String): ResponseEntity<String> {
+        screenShareHandler.sendStartCommand(deviceId)
+        return ResponseEntity.ok("Start command sent to device $deviceId")
     }
 }
